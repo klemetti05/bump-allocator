@@ -1,8 +1,9 @@
 //
 // Created by Klemens Aimetti on 16.01.26.
 //
-
+#include "../tracker.h"
 #include "include/bump.h"
+
 
 using namespace bump;
 
@@ -23,10 +24,13 @@ struct bump::Node
   }
 };
 
+
 BumpAllocator::Frame BumpAllocator::getFrame() noexcept
 {
   return Frame{current, current ? current->index : nullptr};
+
 }
+
 
 void BumpAllocator::restoreFrame(const Frame &frame) noexcept
 {
@@ -79,7 +83,7 @@ void *BumpAllocator::allocate(size_t bytes, size_t align) noexcept
     {
       Node *old = current;
       size_t capacity = std::max(size_t{1024}, bytes);
-      capacity = current ? std::max(current->capacity() * 2, capacity) : capacity;
+      capacity = current ? std::max(std::min(current->capacity() * 2, 1024UL*256UL), capacity) : capacity;
       current = new (malloc(sizeof(Node) + capacity)) Node(capacity, nullptr);
       if (old)
         old->next = current;
@@ -142,6 +146,7 @@ BumpAllocator &BumpAllocator::operator=(BumpAllocator &&other) noexcept
   return *this;
 }
 
+/*
 OwningBumpGuardBase::OwningBumpGuardBase(AllocatorPool &allocatorPool) noexcept
     : pool(&allocatorPool)
 {
@@ -158,4 +163,4 @@ void OwningBumpGuardBase::destruct() noexcept
     pool->push(std::move(allocator));
     pool = nullptr;
   }
-}
+}*/

@@ -1,13 +1,21 @@
 //
 // Created by Klemens Aimetti on 16.01.26.
 //
-
-#ifndef BUMPALLOCATOR_H
-#define BUMPALLOCATOR_H
+#pragma once
 #include <algorithm>
+#include <cassert>
 #include <cstddef>
+#include <cstring>
+#include <memory>
+#include <memory_resource>
 #include <type_traits>
-#include <vector>
+#ifndef NDEBUG
+
+#define DEBUG_ONLY(X) X
+#else
+#define DEBUG_ONLY(X)
+#endif
+
 
 namespace bump
 {
@@ -56,6 +64,79 @@ private:
   friend class BumpGuard;
   friend class OwningBumpGuardBase;
 };
+struct Allocation
+{
+  uintptr_t checksum;
+  std::byte payload[];
+};
+struct BumpGuard
+{
+  BumpAllocator &allocator;
+  BumpAllocator::Frame frame;
+
+  BumpGuard(BumpAllocator &allocator) noexcept : allocator(allocator), frame(allocator.getFrame())
+  {
+  }
+  //BumpGuard(AllocatorPool &pool) noexcept : BumpGuard(pool.getStable()) {}
+
+  ~BumpGuard() noexcept { allocator.restoreFrame(frame); }
+  BumpAllocator *operator->() noexcept { return &allocator; }
+};
+
+
+class PmrGuard: public std::pmr::memory_resource
+{
+  static constexpr size_t MAGIC_NUMBER = 0x68dec895;
+public:
+  BumpAllocator& allocator;
+  BumpAllocator::Frame frame;
+
+  DEBUG_ONLY(
+    size_t checksum = MAGIC_NUMBER;
+    uint32_t allocations = 0;
+  )
+  PmrGuard(BumpAllocator &allocator) noexcept : allocator(allocator){}
+
+  void* do_allocate(size_t bytes, size_t alignment)noexcept final
+  {
+    DEBUG_ONLY(assert(checksum == MAGIC_NUMBER);
+      allocations++;
+    )
+    return allocator.allocate(bytes, alignment);
+  }
+
+  void do_deallocate(void* p, size_t bytes, size_t alignment)noexcept final
+  {
+    DEBUG_ONLY(assert(checksum == MAGIC_NUMBER);
+    allocations--;
+    )
+  }
+
+
+  bool do_is_equal(const std::pmr::memory_resource& other) const noexcept final {
+    DEBUG_ONLY(assert(checksum == MAGIC_NUMBER);)
+    return false;
+  }
+
+  operator BumpAllocator&() noexcept
+  {
+    return allocator;
+  }
+
+  DEBUG_ONLY(~PmrGuard() noexcept{
+    assert(allocations == 0);
+    checksum = 0;
+  })
+};
+
+template <typename T> struct BumpDeleter
+{
+  void operator()(T *p) { p->~T(); }
+};
+
+template <typename T> using unique = std::unique_ptr<T, BumpDeleter<T>>;
+
+/*
 
 class AllocatorPool
 {
@@ -115,20 +196,6 @@ public:
       allocators[i].~BumpAllocator();
     }
   }
-};
-
-struct BumpGuard
-{
-  BumpAllocator &allocator;
-  BumpAllocator::Frame frame;
-
-  BumpGuard(BumpAllocator &allocator) noexcept : allocator(allocator), frame(allocator.getFrame())
-  {
-  }
-  BumpGuard(AllocatorPool &pool) noexcept : BumpGuard(pool.getStable()) {}
-
-  ~BumpGuard() noexcept { allocator.restoreFrame(frame); }
-  BumpAllocator *operator->() noexcept { return &allocator; }
 };
 
 class OwningBumpGuardBase
@@ -281,12 +348,14 @@ template <typename T> struct vector_builder
     guard.destruct();
   }
 };
-
+*/
+/*
 using pool = AllocatorPool;
-using frame_pointer = BumpGuard;
 using frame_handle = OwningBumpGuard;
+*/
 using allocator = BumpAllocator;
-template <typename T> using vector = bump::vector_builder<T>;
+using pmr_fp = PmrGuard;
+using frame_pointer = BumpGuard;
+
 } // namespace bump
 
-#endif // BUMPALLOCATOR_H

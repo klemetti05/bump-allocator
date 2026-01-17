@@ -5,8 +5,8 @@ set(CMAKE_CXX_STANDARD 20)
 
 #bump allocators
 file(GLOB_RECURSE sources
-    CONFIGURE_DEPENDS
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
+        CONFIGURE_DEPENDS
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
 
 add_library(bump_allocator ${sources})
 target_include_directories(bump_allocator PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
