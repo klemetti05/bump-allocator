@@ -1,123 +1,112 @@
 //
 // Created by Klemens Aimetti on 16.01.26.
 //
-#include "../tracker.h"
-#include "include/bump.h"
+#include "bump/bump.h"
 
 
 using namespace bump;
 
-struct bump::Node
-{
-  std::byte *index;
-  std::byte *end;
-  Node *next;
-  std::byte payload[];
 
-  Node(size_t cap, Node *nxt) noexcept : index(payload), end(index + cap), next(nxt) {}
-
-  size_t remaining() const noexcept { return end - index; }
-
-  size_t capacity() const noexcept
-  {
-    return reinterpret_cast<size_t>(end) - reinterpret_cast<size_t>(payload);
-  }
-};
 
 
 BumpAllocator::Frame BumpAllocator::getFrame() noexcept
 {
-  return Frame{current, current ? current->index : nullptr};
+  return Frame{current, current->index};
 
 }
 
 
 void BumpAllocator::restoreFrame(const Frame &frame) noexcept
 {
-  if (frame.current)
-  {
-    current = frame.current;
-    current->index = frame.iterator;
-  }
-  else if (root)
-  {
-    current = root;
-    current->index = frame.iterator;
-  }
+  assert(frame.current);
+  current = frame.current;
+  current->index = frame.iterator;
 }
 
 size_t BumpAllocator::remaining(size_t align) noexcept
 {
-  if (current == nullptr)
-    return 0;
   auto raw = reinterpret_cast<std::uintptr_t>(current->index);
   std::uintptr_t aligned_addr = (raw + align - 1) & ~(align - 1);
   size_t padding = aligned_addr - raw;
   return current->remaining() - padding;
 }
-
-void *BumpAllocator::allocate(size_t bytes, size_t align) noexcept
+size_t BumpAllocator::remainingBytes()noexcept
 {
-  if (current)
-  {
-    auto raw = reinterpret_cast<std::uintptr_t>(current->index);
-    std::uintptr_t aligned_addr = (raw + align - 1) & ~(align - 1);
-    size_t padding = aligned_addr - raw;
-    size_t total_needed = padding + bytes;
+  return current->remaining();
+}
+void BumpAllocator::truncateCurrentBuffer(std::byte* ptr)noexcept
+{
+  current->index = ptr;
+}
+std::byte* BumpAllocator::end()noexcept
+{
+  return current->index;
+}
 
-    if (total_needed <= current->remaining())
-    {
-      void *aligned = reinterpret_cast<void *>(aligned_addr);
-      current->index = static_cast<std::byte *>(aligned) + bytes;
-      return aligned;
-    }
-  }
-
-  while (true)
+void* BumpAllocator::allocateUnaligned(size_t bytes)noexcept
+{
+  if (current->remaining() < bytes)
   {
-    if (current && current->next)
+    while (current->next != nullptr && current->remaining() < bytes)
     {
       current = current->next;
     }
-    else
-    {
-      Node *old = current;
-      size_t capacity = std::max(size_t{1024}, bytes);
-      capacity = current ? std::max(std::min(current->capacity() * 2, 1024UL*256UL), capacity) : capacity;
-      current = new (malloc(sizeof(Node) + capacity)) Node(capacity, nullptr);
-      if (old)
-        old->next = current;
-      else
-        root = current;
+    size_t capacity = std::max(size_t{1024}, bytes);
+    capacity = std::max(std::min(current->capacity() * 2, 1024UL*256UL), capacity);
+
+    auto allocation =
+      std::allocator<std::byte>{}.allocate_at_least(sizeof(Node) + capacity);
+
+    current->next = new (allocation.ptr) Node(allocation.count, nullptr);
+  }
+  auto raw = reinterpret_cast<void*>(current->index);
+  current->index += bytes;
+  return raw;
+}
+void *BumpAllocator::allocate(size_t bytes, size_t align) noexcept
+{
+  auto get_aligned = [&](Node* n) -> std::byte* {
+    auto raw = reinterpret_cast<std::uintptr_t>(n->index);
+    return reinterpret_cast<std::byte*>((raw + align - 1) & ~(align - 1));
+  };
+
+  std::byte* aligned_ptr = get_aligned(current);
+  if (aligned_ptr + bytes <= current->end) {
+    current->index = aligned_ptr + bytes;
+    return aligned_ptr;
+  }
+
+  while (true) {
+    if (current->next) {
+      current = current->next;
+      current->index = current->payload;
+    } else {
+      size_t capacity = std::min(current->capacity() * 2, 256UL * 1024UL);
+      capacity = std::max({size_t{1024}, bytes, });
+      auto allocation = std::allocator<std::byte>{}.allocate_at_least(sizeof(Node) + capacity);
+      current->next = new (allocation.ptr) Node(allocation.count, nullptr);
+      current = current->next;
     }
 
-    auto raw = reinterpret_cast<std::uintptr_t>(current->index);
-    std::uintptr_t aligned_addr = (raw + align - 1) & ~(align - 1);
-    size_t padding = aligned_addr - raw;
-    size_t total_needed = padding + bytes;
-
-    if (total_needed <= current->remaining())
-    {
-      void *aligned = reinterpret_cast<void *>(aligned_addr);
-      current->index = static_cast<std::byte *>(aligned) + bytes;
-      return aligned;
+    aligned_ptr = get_aligned(current);
+    if (aligned_ptr + bytes <= current->end) {
+      current->index = aligned_ptr + bytes;
+      return aligned_ptr;
     }
   }
 }
 
 void BumpAllocator::free() noexcept
 {
-  if (root == nullptr)
-    return;
-
-  for (auto it = root; it != nullptr;)
+  for (auto it = root->next; it != nullptr;)
   {
     Node *next = it->next;
-    ::free(it);
+    std::allocator<std::byte>{}.deallocate(reinterpret_cast<std::byte*>(it), it->end - reinterpret_cast<std::byte*>(it));
     it = next;
   }
-  root = nullptr;
-  current = nullptr;
+  root->index = root->payload;
+  root->next = nullptr;
+  current = root;
 }
 
 BumpAllocator::~BumpAllocator() noexcept
@@ -125,25 +114,68 @@ BumpAllocator::~BumpAllocator() noexcept
   free();
 }
 
-BumpAllocator::BumpAllocator() noexcept : root(nullptr), current(nullptr) {}
-
-BumpAllocator::BumpAllocator(BumpAllocator &&other) noexcept
-    : root(other.root), current(other.current)
+BumpAllocator::BumpAllocator(std::byte* stack_buffer, size_t capacity) noexcept
 {
-  other.root = nullptr;
-  other.current = nullptr;
+  root = new (stack_buffer) Node(capacity, nullptr);
+  current = root;
 }
 
-BumpAllocator &BumpAllocator::operator=(BumpAllocator &&other) noexcept
+using iterator = typename BumpAllocator::Frame::Iterator;
+
+iterator::Iterator(BumpAllocator& allocator, const Frame& first_frame)
 {
-  if (this == &other)
-    return *this;
-  free();
-  root = other.root;
-  current = other.current;
-  other.root = nullptr;
-  other.current = nullptr;
-  return *this;
+  current = first_frame.current;
+  min = first_frame.iterator;
+  last_block = allocator.current;
+  max = last_block->index;
+}
+bool iterator::advance()
+{
+  if (current == last_block)
+  {
+    return false;
+  }
+  current = current->next;
+  min = current->payload;
+  return true;
+}
+
+size_t iterator::count_bytes()
+{
+  size_t bytes = 0;
+  if (*this) do
+  {
+    bytes += block().size_bytes();
+  }while (advance());
+
+  return bytes;
+}
+
+iterator::operator bool()const
+{
+  return current != nullptr;
+}
+
+std::span<std::byte> iterator::block()
+{
+  return {min, current == last_block? max: current->index};
+}
+std::span<char> iterator::chars()
+{
+  auto* end = (current == last_block) ? max : current->index;
+  return {
+    reinterpret_cast<char*>(min),
+    reinterpret_cast<char*>(end)
+  };
+}
+
+std::string_view iterator::string_view() const
+{
+  auto* end = (current == last_block) ? max : current->index;
+  return {
+    reinterpret_cast<const char*>(min),
+    static_cast<size_t>(end - min)
+  };
 }
 
 /*
